@@ -1,0 +1,2103 @@
+// =====================================================================
+//  WHAT MAKES A HERO?   (Microsoft MakeCode Arcade, JavaScript/TypeScript)
+//  Version 2: faster movement, detailed themed maps, animated Lancer
+//
+//  A short top-down narrative adventure. Prince Lancer is sent to find
+//  Princess Noelle. On the way he meets three "monsters". The player can
+//  FIGHT, UNDERSTAND or use MERCY. The game quietly remembers the choices
+//  and Princess Noelle reveals the consequences at the end.
+//
+//  HOW THE CODE IS ORGANISED
+//    1. Kinds, modes, colours and constants
+//    2. Classes (MapExit, MapNote, Creature)
+//    3. Global game state
+//    4. Sprite art drawn with code
+//    5. Drawing helpers (textures, shading, bricks, trees, torches...)
+//    6. The six maps, each with its own colour theme
+//    7. Map management and the exploration loop
+//    8. Battle screen: menu, UNDERSTAND logic, timing-bar FIGHT, dodge
+//    9. Endings
+//   10. Controller events and the per-frame update
+//   11. Start-up
+//
+//  CONTROLS: D-pad = walk / move cursor, A = confirm / read signs,
+//            B = go back from the UNDERSTAND list.
+//
+//  TWEAK THE FEEL: change WALK_SPEED and HEART_SPEED just below.
+//
+//  ACKNOWLEDGEMENTS (edit to match your own Declaration of GenAI Use):
+//   - First draft and version 2 generated with Claude (Anthropic, 2026).
+//   - Ideas for map and sprite handling: MakeCode "Setting the Scene" and
+//     "Maze" tutorials (arcade.makecode.com).
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// 1. KINDS, MODES, COLOURS AND CONSTANTS
+// ---------------------------------------------------------------------
+
+// Custom sprite kinds (Player, Enemy and Projectile already exist).
+namespace SpriteKind {
+    export const NPC = SpriteKind.create()
+    export const Marker = SpriteKind.create()
+    export const Heart = SpriteKind.create()
+    export const UI = SpriteKind.create()
+    export const Pickup = SpriteKind.create()
+}
+
+// The game is always in exactly one mode. Input handlers check the mode
+// first, so a button press can only do something in the right situation.
+enum GameMode {
+    Cutscene,   // dialogue or transition playing, input ignored
+    Explore,    // walking around a map
+    Menu,       // FIGHT / UNDERSTAND / MERCY
+    Understand, // choosing an UNDERSTAND action
+    Timing,     // timing-bar attack
+    Dodge,      // dodging after an enemy retaliates
+    Ending      // final scene
+}
+
+// The 15 colours of the default Arcade palette, with readable names.
+const C_WHITE = 1
+const C_RED = 2
+const C_PINK = 3
+const C_ORANGE = 4
+const C_YELLOW = 5
+const C_TEAL = 6
+const C_GREEN = 7
+const C_BLUE = 8
+const C_SKY = 9
+const C_PURPLE = 10
+const C_LILAC = 11
+const C_PLUM = 12
+const C_TAN = 13
+const C_BROWN = 14
+const C_BLACK = 15
+
+const WALK_SPEED = 2000     // Lancer's walking speed in pixels per second
+const HEART_SPEED = 2000    // heart speed during the dodge phase
+const START_LIFE = 3       // hearts
+const BAR_LEFT = 20        // left end of the timing bar
+const BAR_RIGHT = 140      // right end of the timing bar
+const BAR_CENTRE = 80      // centre of the timing bar (critical zone)
+const CRIT_RANGE = 7       // marker within 7 px of centre = critical hit
+const HIT_RANGE = 26       // marker within 26 px of centre = normal hit
+
+const AREA_NAMES = ["Throne Room", "Border Forest", "Village Road", "Old Bridge", "Royal City", "Castle Hall"]
+
+// The opening throne-room conversation, one string per dialogue box.
+const OPENING_LINES = [
+    "KING: Prince Lancer. Come forward.",
+    "LANCER: You summoned me, Father?",
+    "KING: I did. Troubling news has reached the kingdom.",
+    "KING: Princess Noelle has disappeared.",
+    "LANCER: Disappeared?",
+    "KING: Travellers claim she was last seen beyond the eastern forest.",
+    "KING: They speak of strange creatures roaming the roads, and monsters gathering near the old castle.",
+    "LANCER: Then she could be in danger.",
+    "KING: That is what I fear.",
+    "KING: I am sending you to find her.",
+    "KING: Bring Princess Noelle home safely.",
+    "LANCER: I won't fail you.",
+    "KING: But listen carefully, Lancer.",
+    "KING: The world beyond these walls may not be as simple as the stories you were taught.",
+    "LANCER: What do you mean?",
+    "KING: You will have to discover that for yourself.",
+    "KING: A sword may protect you...",
+    "KING: ...but knowing when not to use it may protect you more.",
+    "LANCER: I'll remember that.",
+    "KING: Then go. Find Princess Noelle, and return safely."
+]
+
+
+// ---------------------------------------------------------------------
+// 2. CLASSES
+// ---------------------------------------------------------------------
+
+// A rectangle on the map that moves Lancer to another map.
+class MapExit {
+    x: number
+    y: number
+    w: number
+    h: number
+    target: number   // index of the map to load
+    spawnX: number   // where Lancer appears on the new map
+    spawnY: number
+    constructor(x: number, y: number, w: number, h: number, target: number, spawnX: number, spawnY: number) {
+        this.x = x
+        this.y = y
+        this.w = w
+        this.h = h
+        this.target = target
+        this.spawnX = spawnX
+        this.spawnY = spawnY
+    }
+}
+
+// Something Lancer can read by standing close and pressing A.
+// This is how the world tells its story without long dialogue.
+class MapNote {
+    x: number
+    y: number
+    text: string
+    lockedText: string   // shown instead of text until creature `needs` is resolved
+    needs: number        // creature index (-1 = always show text)
+    constructor(x: number, y: number, text: string) {
+        this.x = x
+        this.y = y
+        this.text = text
+        this.lockedText = ""
+        this.needs = -1
+    }
+}
+
+// One creature Lancer can meet. Each has its own problem and solution.
+class Creature {
+    id: number           // 0 = Tarn (guard), 1 = Moss (hungry), 2 = Wren (ghost)
+    name: string
+    maxHp: number
+    hp: number
+    img: Image
+    sprite: Sprite
+    state: number        // 0 = unresolved, 1 = spared, 2 = killed
+    mapIndex: number     // which map the creature waits on
+    worldX: number       // where it stands blocking the path
+    worldY: number
+    restX: number        // where it stands after being spared
+    restY: number
+    hallX: number        // where it appears in the castle if spared
+    hallY: number
+    flagA: boolean       // first understanding step done
+    flagB: boolean       // second understanding step done
+    barSpeed: number     // how fast the timing marker moves
+    dodgeMs: number      // how long its retaliation lasts
+    spawnMs: number      // how often it fires a projectile
+    options: string[]    // its UNDERSTAND menu
+    introLines: string[]
+    unlockLine: string
+    spareLines: string[]
+    deathLines: string[]
+    constructor(id: number, name: string, maxHp: number, img: Image, mapIndex: number) {
+        this.id = id
+        this.name = name
+        this.maxHp = maxHp
+        this.hp = maxHp
+        this.img = img
+        this.sprite = null
+        this.state = 0
+        this.mapIndex = mapIndex
+        this.worldX = 0
+        this.worldY = 0
+        this.restX = 0
+        this.restY = 0
+        this.hallX = 0
+        this.hallY = 0
+        this.flagA = false
+        this.flagB = false
+        this.barSpeed = 90
+        this.dodgeMs = 2400
+        this.spawnMs = 500
+        this.options = []
+        this.introLines = []
+        this.unlockLine = ""
+        this.spareLines = []
+        this.deathLines = []
+    }
+}
+
+
+// ---------------------------------------------------------------------
+// 3. GLOBAL GAME STATE
+// ---------------------------------------------------------------------
+
+let mode = GameMode.Cutscene
+let kills = 0              // ROUTE TRACKING: 0 = good ending, 1+ = bad ending
+let hasBread = false       // does Lancer carry the loaf?
+let breadTaken = false     // has the loaf been picked up already?
+let canMercy = false       // is MERCY unlocked for the current creature?
+let inBattle = false       // true while the battle screen is showing
+let mapIndex = 0           // 0 throne, 1 forest, 2 village, 3 bridge, 4 city, 5 hall
+let lastHit = 0            // time of the last hit taken (invincibility timer)
+let menuIndex = 0          // which menu row the cursor is on
+let menuItems: string[] = []
+let lastGoodX = 80         // last position that was not inside a wall
+let lastGoodY = 96
+let facing = 1             // 1 = Lancer faces right, -1 = faces left
+let walkTimer = 0          // counts frames while Lancer walks (for animation)
+let areaToken = 0          // makes sure an old area title cannot erase a new UI
+
+let lancer: Sprite = null
+let ui: Sprite = null      // one big transparent sprite we draw menus on
+let marker: Sprite = null  // the moving timing-bar marker
+let heart: Sprite = null   // Lancer's heart during the dodge phase
+let bread: Sprite = null
+let foe: Creature = null   // the creature Lancer is currently facing
+
+let bg: Image = null       // background of the current map
+let heartImg: Image = null
+let markerImg: Image = null
+let breadImg: Image = null
+let lancerImgs: Image[] = []   // right step 1, right step 2, left step 1, left step 2
+let lancerCurrent: Image = null
+
+let walls: number[][] = [] // each wall is [x, y, width, height]
+let exits: MapExit[] = []
+let notes: MapNote[] = []
+let cast: Creature[] = []  // the three creatures
+
+
+// ---------------------------------------------------------------------
+// 4. SPRITE ART DRAWN WITH CODE
+//    To use your own pixel art, draw it in the Image Editor and replace
+//    the body of a make...Image function with:  return img`...`
+// ---------------------------------------------------------------------
+
+// Pixel lookup that returns 0 (transparent) outside the picture.
+function pixelAt(src: Image, x: number, y: number): number {
+    if (x < 0 || y < 0 || x >= src.width || y >= src.height) {
+        return 0
+    }
+    return src.getPixel(x, y)
+}
+
+// Adds a black outline around every opaque shape in a sprite.
+function outlined(src: Image): Image {
+    let o = image.create(src.width, src.height)
+    for (let x = 0; x < src.width; x++) {
+        for (let y = 0; y < src.height; y++) {
+            let c = src.getPixel(x, y)
+            if (c == 0) {
+                if (pixelAt(src, x - 1, y) != 0 || pixelAt(src, x + 1, y) != 0 || pixelAt(src, x, y - 1) != 0 || pixelAt(src, x, y + 1) != 0) {
+                    c = C_BLACK
+                }
+            }
+            o.setPixel(x, y, c)
+        }
+    }
+    return o
+}
+
+// Mirrors a sprite left-to-right (used for Lancer facing left).
+function mirror(src: Image): Image {
+    let m = image.create(src.width, src.height)
+    for (let x = 0; x < src.width; x++) {
+        for (let y = 0; y < src.height; y++) {
+            m.setPixel(src.width - 1 - x, y, src.getPixel(x, y))
+        }
+    }
+    return m
+}
+
+// Doubles a sprite so creatures look bigger on the battle screen.
+// Loops over every pixel and paints it as a 2x2 block.
+function enlarge(src: Image): Image {
+    let big = image.create(src.width * 2, src.height * 2)
+    for (let x = 0; x < src.width; x++) {
+        for (let y = 0; y < src.height; y++) {
+            big.fillRect(x * 2, y * 2, 2, 2, src.getPixel(x, y))
+        }
+    }
+    return big
+}
+
+// A generic person. `step` (0 or 1) moves the legs for a walking cycle.
+function makePerson(hair: number, skin: number, cloth: number, trim: number, crowned: boolean, step: number): Image {
+    let p = image.create(16, 16)
+    p.fillRect(5, 2, 6, 5, skin)          // head
+    p.fillRect(5, 1, 6, 2, hair)          // hair or helmet
+    p.fillRect(4, 2, 1, 3, hair)
+    p.fillRect(11, 2, 1, 3, hair)
+    if (crowned) {
+        p.fillRect(5, 0, 6, 2, C_YELLOW)  // gold crown
+        p.setPixel(5, 0, 0)
+        p.setPixel(7, 0, 0)
+        p.setPixel(10, 0, 0)
+    }
+    p.setPixel(6, 4, C_BLACK)             // eyes
+    p.setPixel(9, 4, C_BLACK)
+    p.fillRect(4, 7, 8, 6, cloth)         // body
+    p.fillRect(3, 7, 1, 4, cloth)         // arms
+    p.fillRect(12, 7, 1, 4, cloth)
+    p.fillRect(3, 11, 1, 1, skin)         // hands
+    p.fillRect(12, 11, 1, 1, skin)
+    p.fillRect(5, 7, 6, 1, trim)          // collar
+    p.fillRect(4, 11, 8, 1, trim)         // belt
+    if (step == 0) {
+        p.fillRect(5, 13, 2, 3, C_PLUM)   // legs together
+        p.fillRect(9, 13, 2, 3, C_PLUM)
+        p.fillRect(5, 15, 2, 1, C_BROWN)
+        p.fillRect(9, 15, 2, 1, C_BROWN)
+    } else {
+        p.fillRect(4, 13, 2, 3, C_PLUM)   // legs apart
+        p.fillRect(10, 13, 2, 3, C_PLUM)
+        p.fillRect(4, 15, 2, 1, C_BROWN)
+        p.fillRect(10, 15, 2, 1, C_BROWN)
+    }
+    return p
+}
+
+// Lancer: blue tunic, red cape, sword on his right.
+function makeLancerFrame(step: number): Image {
+    let l = makePerson(C_BROWN, C_TAN, C_BLUE, C_YELLOW, false, step)
+    l.fillRect(2, 8, 2, 6, C_RED)         // cape
+    l.fillRect(13, 4, 1, 8, C_WHITE)      // sword blade
+    l.fillRect(12, 11, 3, 1, C_YELLOW)    // sword guard
+    return outlined(l)
+}
+
+function makeKingImage(): Image {
+    let k = makePerson(C_WHITE, C_TAN, C_PURPLE, C_WHITE, true, 0)
+    k.fillRect(3, 12, 10, 4, C_PURPLE)    // long robe
+    k.fillRect(3, 15, 10, 1, C_WHITE)     // ermine hem
+    k.fillRect(5, 6, 6, 3, C_WHITE)       // beard
+    k.fillRect(5, 7, 6, 1, C_WHITE)
+    return outlined(k)
+}
+
+function makeNoelleImage(): Image {
+    let n = makePerson(C_YELLOW, C_TAN, C_PINK, C_WHITE, true, 0)
+    n.fillRect(3, 11, 10, 5, C_PINK)      // long skirt
+    n.fillRect(3, 15, 10, 1, C_WHITE)
+    n.fillRect(4, 5, 1, 5, C_YELLOW)      // long hair
+    n.fillRect(11, 5, 1, 5, C_YELLOW)
+    return outlined(n)
+}
+
+function makeGuardImage(): Image {
+    let g = makePerson(C_LILAC, C_TAN, C_BLUE, C_WHITE, false, 0)
+    g.fillRect(4, 1, 8, 3, C_LILAC)       // steel helmet
+    g.fillRect(7, 3, 2, 3, C_LILAC)       // nose guard
+    g.fillRect(1, 2, 1, 14, C_BROWN)      // spear shaft
+    g.fillRect(0, 0, 3, 2, C_WHITE)       // spear tip
+    return outlined(g)
+}
+
+function makeMossImage(): Image {
+    let m = image.create(16, 16)
+    m.fillRect(3, 4, 10, 10, C_GREEN)     // body
+    m.fillRect(3, 1, 3, 4, C_GREEN)       // ears
+    m.fillRect(10, 1, 3, 4, C_GREEN)
+    m.fillRect(4, 2, 1, 2, C_PINK)
+    m.fillRect(11, 2, 1, 2, C_PINK)
+    m.fillRect(6, 9, 4, 4, C_YELLOW)      // belly
+    m.fillRect(5, 6, 2, 2, C_WHITE)       // eyes
+    m.fillRect(9, 6, 2, 2, C_WHITE)
+    m.setPixel(6, 7, C_BLACK)
+    m.setPixel(10, 7, C_BLACK)
+    m.fillRect(4, 14, 3, 2, C_TEAL)       // feet
+    m.fillRect(9, 14, 3, 2, C_TEAL)
+    return outlined(m)
+}
+
+function makeWrenImage(): Image {
+    let w = image.create(16, 16)
+    w.fillRect(4, 1, 8, 1, C_WHITE)       // rounded head
+    w.fillRect(3, 2, 10, 11, C_WHITE)     // body
+    w.fillRect(11, 3, 1, 8, C_SKY)        // pale blue shading
+    for (let x = 3; x < 13; x++) {        // ragged hem
+        if (x % 2 == 0) {
+            w.fillRect(x, 13, 1, 3, C_WHITE)
+        } else {
+            w.fillRect(x, 13, 1, 2, C_SKY)
+        }
+    }
+    w.fillRect(5, 6, 2, 3, C_BLACK)       // eyes
+    w.fillRect(9, 6, 2, 3, C_BLACK)
+    w.fillRect(7, 10, 2, 1, C_BLACK)      // mouth
+    return outlined(w)
+}
+
+function makeHeartImage(): Image {
+    let h = image.create(5, 5)
+    h.fillRect(0, 1, 5, 2, C_RED)
+    h.setPixel(1, 0, C_RED)
+    h.setPixel(3, 0, C_RED)
+    h.fillRect(1, 3, 3, 1, C_RED)
+    h.setPixel(2, 4, C_RED)
+    h.setPixel(1, 1, C_PINK)
+    return h
+}
+
+function makeMarkerImage(): Image {
+    let m = image.create(4, 16)
+    m.fill(C_WHITE)
+    m.drawRect(0, 0, 4, 16, C_BLACK)
+    return m
+}
+
+function makeBreadImage(): Image {
+    let b = image.create(8, 6)
+    b.fillRect(0, 1, 8, 5, C_ORANGE)
+    b.drawRect(0, 1, 8, 5, C_BROWN)
+    b.fillRect(2, 2, 1, 2, C_YELLOW)
+    b.fillRect(5, 2, 1, 2, C_YELLOW)
+    return b
+}
+
+// Each creature fires a different projectile in its retaliation.
+function makeBullet(id: number): Image {
+    let b: Image = null
+    if (id == 0) {
+        b = image.create(3, 9)        // thrown spear
+        b.fill(C_SKY)
+        b.setPixel(1, 0, C_WHITE)
+    } else if (id == 1) {
+        b = image.create(5, 5)        // snapping bite
+        b.fill(C_ORANGE)
+        b.setPixel(0, 0, 0)
+        b.setPixel(4, 0, 0)
+        b.setPixel(0, 4, 0)
+        b.setPixel(4, 4, 0)
+    } else {
+        b = image.create(5, 5)        // cold wisp
+        b.fill(C_WHITE)
+        b.setPixel(0, 0, 0)
+        b.setPixel(4, 0, 0)
+        b.setPixel(0, 4, 0)
+        b.setPixel(4, 4, 0)
+        b.setPixel(2, 2, C_SKY)
+    }
+    return b
+}
+
+
+// ---------------------------------------------------------------------
+// 5. DRAWING HELPERS
+//    Every map is painted onto the global image `bg`. Walls are rectangles
+//    stored in the `walls` list, so what you see is what you collide with.
+// ---------------------------------------------------------------------
+
+// Scatter `count` single pixels of one colour inside a rectangle.
+function speckle(x: number, y: number, w: number, h: number, col: number, count: number) {
+    for (let i = 0; i < count; i++) {
+        bg.setPixel(randint(x, x + w - 1), randint(y, y + h - 1), col)
+    }
+}
+
+// Checkerboard dither: soft shadows and glows using only 16 colours.
+function shade(x: number, y: number, w: number, h: number, col: number) {
+    for (let i = 0; i < w; i++) {
+        for (let j = 0; j < h; j++) {
+            if ((i + j) % 2 == 0) {
+                bg.setPixel(x + i, y + j, col)
+            }
+        }
+    }
+}
+
+// Fill a rectangle with rows of bricks.
+function bricks(x: number, y: number, w: number, h: number, base: number, mortar: number) {
+    bg.fillRect(x, y, w, h, base)
+    for (let r = 0; r * 6 < h; r++) {
+        let ry = y + r * 6
+        let rowH = Math.min(6, y + h - ry)
+        bg.fillRect(x, ry, w, 1, mortar)
+        let off = 0
+        if (r % 2 == 1) {
+            off = 5
+        }
+        for (let bx = x + off; bx < x + w; bx += 10) {
+            bg.fillRect(bx, ry, 1, rowH, mortar)
+        }
+    }
+}
+
+// A brick block that is also a wall.
+function wallBlock(x: number, y: number, w: number, h: number, base: number, mortar: number) {
+    bricks(x, y, w, h, base, mortar)
+    bg.drawRect(x, y, w, h, C_BLACK)
+    walls.push([x, y, w, h])
+}
+
+// A plain block that is also a wall.
+function solid(x: number, y: number, w: number, h: number, col: number, edge: number) {
+    bg.fillRect(x, y, w, h, col)
+    bg.drawRect(x, y, w, h, edge)
+    walls.push([x, y, w, h])
+}
+
+// Walls everywhere except a horizontal strip (top..bottom) of road.
+function corridor(top: number, bottom: number) {
+    walls.push([0, 0, 160, top])
+    walls.push([0, bottom, 160, 120 - bottom])
+}
+
+// A 10x10 marble pillar (a wall).
+function pillar(x: number, y: number) {
+    bg.fillRect(x, y, 10, 10, C_TAN)
+    bg.fillRect(x, y, 2, 10, C_WHITE)       // lit side
+    bg.fillRect(x + 7, y, 3, 10, C_LILAC)   // shaded side
+    bg.fillRect(x, y, 10, 2, C_PLUM)        // capital
+    bg.fillRect(x, y + 8, 10, 2, C_PLUM)    // base
+    bg.drawRect(x, y, 10, 10, C_BLACK)
+    shade(x - 1, y + 10, 12, 3, C_PLUM)     // floor shadow
+    walls.push([x, y, 10, 10])
+}
+
+// A wall torch with a warm glow around it.
+function torch(x: number, y: number) {
+    shade(x - 6, y - 4, 14, 16, C_ORANGE)   // glow first, so the torch sits on top
+    bg.fillRect(x, y + 5, 2, 6, C_BROWN)
+    bg.fillRect(x - 1, y + 4, 4, 2, C_BLACK)
+    bg.fillRect(x, y, 2, 4, C_ORANGE)
+    bg.fillRect(x, y + 1, 2, 2, C_YELLOW)
+    bg.setPixel(x, y - 1, C_YELLOW)
+}
+
+// A throne on a back wall.
+function drawThrone(x: number, y: number) {
+    bg.fillRect(x, y, 18, 15, C_YELLOW)
+    bg.drawRect(x, y, 18, 15, C_BROWN)
+    bg.fillRect(x + 3, y + 7, 12, 8, C_RED)     // cushion
+    bg.fillRect(x, y + 7, 3, 8, C_ORANGE)       // arms
+    bg.fillRect(x + 15, y + 7, 3, 8, C_ORANGE)
+    bg.setPixel(x + 2, y - 1, C_YELLOW)         // finials
+    bg.setPixel(x + 9, y - 1, C_YELLOW)
+    bg.setPixel(x + 15, y - 1, C_YELLOW)
+    bg.fillRect(x + 7, y + 2, 4, 3, C_RED)      // jewel
+}
+
+// A hanging banner with a gold emblem.
+function banner(x: number, y: number, w: number, h: number) {
+    bg.fillRect(x, y, w, h, C_RED)
+    bg.fillRect(x, y, w, 1, C_YELLOW)
+    bg.fillRect(x + Math.idiv(w, 2) - 1, y + 3, 3, 3, C_YELLOW)
+    bg.fillRect(x + Math.idiv(w, 2), y + 6, 1, 2, C_YELLOW)
+    bg.setPixel(x, y + h - 1, 0)
+    bg.setPixel(x + w - 1, y + h - 1, 0)
+}
+
+// A tall candle stand.
+function candles(x: number, y: number) {
+    bg.fillRect(x, y + 3, 2, 8, C_BROWN)
+    bg.fillRect(x - 1, y + 10, 4, 1, C_BROWN)
+    bg.fillRect(x, y + 1, 2, 2, C_WHITE)
+    bg.setPixel(x, y, C_YELLOW)
+    bg.setPixel(x + 1, y - 1, C_ORANGE)
+    shade(x - 4, y - 3, 10, 8, C_YELLOW)
+}
+
+// One tree (16 wide, 17 tall) with a sunlit side and a shaded side.
+function drawTree(x: number, y: number) {
+    bg.fillRect(x + 6, y + 10, 4, 7, C_BROWN)     // trunk
+    bg.fillRect(x + 9, y + 10, 1, 7, C_PLUM)
+    bg.fillRect(x + 3, y, 10, 1, C_PLUM)          // outline
+    bg.fillRect(x + 1, y + 1, 14, 10, C_TEAL)     // leaves
+    bg.fillRect(x + 2, y + 11, 12, 1, C_PLUM)
+    bg.fillRect(x + 2, y + 2, 5, 4, C_GREEN)      // sunlit leaves
+    bg.setPixel(x + 4, y + 7, C_GREEN)
+    bg.setPixel(x + 11, y + 3, C_GREEN)
+    shade(x + 8, y + 7, 6, 4, C_PLUM)             // shadow side
+}
+
+// Bands of trees. One big wall covers the whole band.
+function forestBand(y: number, rows: number) {
+    for (let r = 0; r < rows; r++) {
+        let off = 0
+        if (r % 2 == 1) {
+            off = 8
+        }
+        for (let x = -8; x < 160; x += 16) {
+            drawTree(x + off, y + r * 16)
+        }
+    }
+    walls.push([0, y, 160, rows * 16])
+}
+
+// A small flower.
+function flower(x: number, y: number, col: number) {
+    bg.setPixel(x, y, C_YELLOW)
+    bg.setPixel(x - 1, y, col)
+    bg.setPixel(x + 1, y, col)
+    bg.setPixel(x, y - 1, col)
+    bg.setPixel(x, y + 1, C_GREEN)
+}
+
+// A signpost.
+function signPost(x: number, y: number) {
+    bg.fillRect(x - 1, y, 2, 8, C_BROWN)
+    bg.fillRect(x - 6, y - 6, 12, 7, C_TAN)
+    bg.drawRect(x - 6, y - 6, 12, 7, C_BROWN)
+    bg.fillRect(x - 4, y - 4, 8, 1, C_BROWN)
+    bg.fillRect(x - 4, y - 2, 5, 1, C_BROWN)
+}
+
+// Cobblestones: a base colour with rows of stones outlined in `line`.
+function cobbles(x: number, y: number, w: number, h: number, base: number, line: number) {
+    bg.fillRect(x, y, w, h, base)
+    for (let r = 0; r * 4 < h; r++) {
+        let ry = y + r * 4
+        bg.fillRect(x, ry, w, 1, line)
+        let off = 0
+        if (r % 2 == 1) {
+            off = 3
+        }
+        for (let cx = x + off; cx < x + w; cx += 6) {
+            bg.fillRect(cx, ry, 1, Math.min(4, y + h - ry), line)
+        }
+    }
+}
+
+// A cottage with timber framing, shingled roof, shutters and a flower box.
+function house(x: number, y: number, w: number, h: number, roof: number, wall: number) {
+    bg.fillRect(x, y + 8, w, h - 8, wall)                  // plaster walls
+    bg.fillRect(x, y + 8, 2, h - 8, C_BROWN)               // timber posts
+    bg.fillRect(x + w - 2, y + 8, 2, h - 8, C_BROWN)
+    bg.fillRect(x, y + 13, w, 1, C_BROWN)                  // beam
+    bg.drawRect(x, y + 8, w, h - 8, C_BROWN)
+    bg.fillRect(x - 2, y, w + 4, 10, roof)                 // roof
+    for (let r = 2; r < 10; r += 3) {
+        bg.fillRect(x - 2, y + r, w + 4, 1, C_PLUM)        // shingle rows
+        for (let sx = x - 2 + (r % 2) * 2; sx < x + w + 2; sx += 4) {
+            bg.fillRect(sx, y + r, 1, 2, C_PLUM)
+        }
+    }
+    bg.drawRect(x - 2, y, w + 4, 10, C_BLACK)
+    bg.fillRect(x - 2, y + 10, w + 4, 1, C_PLUM)           // eave shadow
+    // door
+    let dx = x + Math.idiv(w, 2) - 3
+    bg.fillRect(dx, y + h - 11, 7, 11, C_BROWN)
+    bg.fillRect(dx + 3, y + h - 11, 1, 11, C_PLUM)
+    bg.setPixel(dx + 5, y + h - 5, C_YELLOW)
+    // windows with shutters, and a flower box under the left one
+    bg.fillRect(x + 5, y + 16, 7, 6, C_SKY)
+    bg.drawRect(x + 5, y + 16, 7, 6, C_BROWN)
+    bg.fillRect(x + 8, y + 16, 1, 6, C_BROWN)
+    bg.fillRect(x + 3, y + 16, 2, 6, C_BROWN)
+    bg.fillRect(x + 12, y + 16, 2, 6, C_BROWN)
+    bg.fillRect(x + 4, y + 22, 9, 2, C_BROWN)
+    bg.setPixel(x + 5, y + 21, C_RED)
+    bg.setPixel(x + 8, y + 21, C_PINK)
+    bg.setPixel(x + 11, y + 21, C_RED)
+    bg.fillRect(x + w - 12, y + 16, 7, 6, C_SKY)
+    bg.drawRect(x + w - 12, y + 16, 7, 6, C_BROWN)
+    bg.fillRect(x + w - 9, y + 16, 1, 6, C_BROWN)
+    // chimney and smoke
+    bg.fillRect(x + w - 8, y - 4, 5, 8, C_BROWN)
+    bg.fillRect(x + w - 8, y - 4, 5, 1, C_BLACK)
+    if (y > 20) {
+        speckle(x + w - 10, y - 12, 8, 8, C_WHITE, 7)
+    }
+    walls.push([x, y + 8, w, h - 8])
+}
+
+function barrel(x: number, y: number) {
+    bg.fillRect(x, y, 8, 9, C_BROWN)
+    bg.fillRect(x, y + 2, 8, 1, C_PLUM)
+    bg.fillRect(x, y + 6, 8, 1, C_PLUM)
+    bg.fillRect(x + 1, y, 6, 1, C_TAN)
+    bg.drawRect(x, y, 8, 9, C_BLACK)
+}
+
+function picketFence(x: number, y: number, w: number) {
+    for (let fx = x; fx < x + w; fx += 3) {
+        bg.fillRect(fx, y, 2, 7, C_TAN)
+        bg.setPixel(fx, y - 1, C_TAN)
+    }
+    bg.fillRect(x, y + 2, w, 1, C_BROWN)
+    bg.fillRect(x, y + 5, w, 1, C_BROWN)
+}
+
+function lampPost(x: number, y: number) {
+    bg.fillRect(x, y + 4, 2, 9, C_BLACK)
+    bg.fillRect(x - 1, y, 4, 4, C_YELLOW)
+    bg.drawRect(x - 1, y, 4, 4, C_BLACK)
+    shade(x - 5, y - 3, 12, 10, C_YELLOW)
+}
+
+function hedge(x: number, y: number, w: number, h: number) {
+    bg.fillRect(x, y, w, h, C_TEAL)
+    speckle(x, y, w, h, C_GREEN, Math.idiv(w * h, 3))
+    bg.drawRect(x, y, w, h, C_PLUM)
+}
+
+// A full moon with a soft edge and craters.
+function moon(cx: number, cy: number, r: number) {
+    for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+            let d = dx * dx + dy * dy
+            if (d <= r * r) {
+                let col = C_WHITE
+                if (d > (r - 1) * (r - 1)) {
+                    col = C_SKY
+                }
+                bg.setPixel(cx + dx, cy + dy, col)
+            }
+        }
+    }
+    bg.setPixel(cx - 2, cy - 1, C_LILAC)
+    bg.setPixel(cx - 1, cy - 1, C_LILAC)
+    bg.setPixel(cx + 2, cy + 2, C_LILAC)
+    bg.setPixel(cx + 1, cy - 3, C_LILAC)
+}
+
+// A pine-tree silhouette (a stack of widening rows).
+function pine(x: number, baseY: number, h: number, col: number) {
+    for (let i = 0; i < h; i++) {
+        let half = Math.idiv(i, 3)
+        bg.fillRect(x - half, baseY - h + i, 1 + half * 2, 1, col)
+    }
+    bg.fillRect(x, baseY, 1, 2, col)
+}
+
+function addNote(x: number, y: number, text: string) {
+    notes.push(new MapNote(x, y, text))
+}
+
+function addExit(x: number, y: number, w: number, h: number, target: number, spawnX: number, spawnY: number) {
+    exits.push(new MapExit(x, y, w, h, target, spawnX, spawnY))
+}
+
+
+// ---------------------------------------------------------------------
+// 6. THE SIX MAPS (each has its own colour theme)
+// ---------------------------------------------------------------------
+
+// ----- Map 0: Throne room. Theme: royal red, gold and cream marble -----
+function buildThroneRoom() {
+    // marble floor: cream and white tiles with lilac grout
+    for (let ty = 0; ty < 8; ty++) {
+        for (let tx = 0; tx < 10; tx++) {
+            let col = C_TAN
+            if ((tx + ty) % 2 == 1) {
+                col = C_WHITE
+            }
+            bg.fillRect(tx * 16, ty * 16, 16, 16, col)
+        }
+    }
+    for (let x = 0; x < 160; x += 16) {
+        bg.drawLine(x, 0, x, 119, C_LILAC)
+    }
+    for (let y = 0; y < 120; y += 16) {
+        bg.drawLine(0, y, 159, y, C_LILAC)
+    }
+    speckle(0, 0, 160, 120, C_LILAC, 60)                  // marble veins
+
+    // sunbeams from the stained windows
+    for (let k = 0; k < 5; k++) {
+        shade(30 + k * 3, 22 + k * 15, 12, 7, C_YELLOW)
+        shade(116 - k * 3, 22 + k * 15, 12, 7, C_YELLOW)
+    }
+
+    // red carpet with a gold border and a diamond pattern
+    bg.fillRect(68, 18, 24, 102, C_RED)
+    bg.fillRect(68, 18, 2, 102, C_YELLOW)
+    bg.fillRect(90, 18, 2, 102, C_YELLOW)
+    bg.fillRect(71, 18, 1, 102, C_ORANGE)
+    bg.fillRect(88, 18, 1, 102, C_ORANGE)
+    let half = [0, 1, 2, 1, 0]
+    for (let y = 26; y < 106; y += 14) {
+        for (let r = 0; r < 5; r++) {
+            bg.fillRect(80 - half[r], y + r, half[r] * 2 + 1, 1, C_YELLOW)
+        }
+    }
+
+    // walls
+    wallBlock(0, 0, 160, 18, C_PLUM, C_BLACK)
+    bg.fillRect(0, 16, 160, 1, C_YELLOW)                  // gold trim
+    wallBlock(0, 0, 8, 120, C_PLUM, C_BLACK)
+    wallBlock(152, 0, 8, 120, C_PLUM, C_BLACK)
+    wallBlock(0, 112, 64, 8, C_PLUM, C_BLACK)
+    wallBlock(96, 112, 64, 8, C_PLUM, C_BLACK)
+    shade(8, 18, 60, 3, C_PLUM)                           // wall shadows
+    shade(92, 18, 60, 3, C_PLUM)
+
+    // stained-glass windows
+    for (let wi = 0; wi < 2; wi++) {
+        let wx = 34
+        if (wi == 1) {
+            wx = 114
+        }
+        bg.fillRect(wx, 3, 12, 13, C_BLACK)
+        bg.fillRect(wx + 1, 4, 5, 5, C_SKY)
+        bg.fillRect(wx + 6, 4, 5, 5, C_PURPLE)
+        bg.fillRect(wx + 1, 9, 5, 6, C_PURPLE)
+        bg.fillRect(wx + 6, 9, 5, 6, C_SKY)
+    }
+    banner(20, 2, 10, 14)
+    banner(130, 2, 10, 14)
+    torch(54, 4)
+    torch(104, 4)
+    drawThrone(71, 1)
+
+    pillar(28, 44)
+    pillar(122, 44)
+    pillar(28, 80)
+    pillar(122, 80)
+
+    // the doorway glows with daylight
+    bg.fillRect(64, 112, 32, 8, C_SKY)
+    shade(64, 106, 32, 6, C_SKY)
+    bg.fillRect(62, 106, 2, 14, C_BROWN)
+    bg.fillRect(96, 106, 2, 14, C_BROWN)
+
+    addExit(64, 104, 32, 16, 1, 16, 60)
+}
+
+// ----- Map 1: Forest and border gate. Theme: deep greens and earthy browns -----
+function buildForest() {
+    bg.fill(C_GREEN)
+    speckle(0, 0, 160, 120, C_TEAL, 220)                  // grass texture
+
+    // dirt road with ruts, pebbles and fallen leaves
+    bg.fillRect(0, 48, 160, 24, C_TAN)
+    speckle(0, 48, 160, 24, C_BROWN, 80)
+    speckle(0, 48, 160, 24, C_LILAC, 30)
+    shade(0, 55, 160, 2, C_BROWN)
+    shade(0, 63, 160, 2, C_BROWN)
+    speckle(0, 48, 160, 24, C_ORANGE, 8)
+    speckle(0, 48, 160, 24, C_RED, 4)
+    speckle(0, 47, 160, 3, C_GREEN, 40)                   // grass tufts on the road edges
+    speckle(0, 70, 160, 3, C_GREEN, 40)
+
+    forestBand(0, 3)
+    forestBand(72, 3)
+    shade(0, 44, 160, 4, C_PLUM)                          // shade under the trees
+    shade(0, 72, 160, 4, C_PLUM)
+    shade(20, 50, 9, 20, C_YELLOW)                        // sun shafts through the leaves
+    shade(64, 50, 9, 20, C_YELLOW)
+    shade(140, 50, 9, 20, C_YELLOW)
+
+    // the border gate: stone posts, a banner and a watch brazier
+    bricks(98, 36, 12, 14, C_LILAC, C_PLUM)
+    bg.drawRect(98, 36, 12, 14, C_BLACK)
+    bg.fillRect(97, 35, 14, 3, C_PLUM)
+    bricks(98, 70, 12, 14, C_LILAC, C_PLUM)
+    bg.drawRect(98, 70, 12, 14, C_BLACK)
+    bg.fillRect(97, 69, 14, 3, C_PLUM)
+    bg.fillRect(103, 24, 1, 12, C_BROWN)                  // flag pole
+    bg.fillRect(104, 24, 7, 5, C_RED)
+    bg.setPixel(107, 26, C_YELLOW)
+    bg.fillRect(124, 52, 8, 2, C_BLACK)                   // brazier
+    bg.fillRect(126, 54, 4, 5, C_BLACK)
+    bg.fillRect(125, 49, 6, 3, C_ORANGE)
+    bg.fillRect(126, 47, 4, 3, C_YELLOW)
+    shade(120, 44, 16, 14, C_ORANGE)
+
+    signPost(34, 58)
+    addNote(34, 58, "NOTICE: Border guards on watch. Report anyone carrying a weapon.")
+    addExit(146, 48, 14, 24, 2, 16, 60)
+}
+
+// ----- Map 2: Village road. Theme: warm tan, terracotta roofs and green fields -----
+function buildVillage() {
+    bg.fill(C_GREEN)
+    speckle(0, 0, 160, 120, C_TEAL, 160)
+    for (let i = 0; i < 16; i++) {
+        flower(randint(2, 157), randint(2, 43), C_PINK)
+    }
+    cobbles(0, 46, 160, 30, C_TAN, C_LILAC)               // village road
+    speckle(0, 46, 160, 30, C_BROWN, 40)
+    corridor(46, 76)
+
+    house(6, 10, 36, 34, C_RED, C_TAN)                    // bakery
+    house(58, 12, 36, 32, C_ORANGE, C_TAN)
+    house(110, 10, 40, 34, C_BROWN, C_TAN)
+    house(8, 82, 34, 34, C_RED, C_TAN)
+    house(112, 80, 38, 36, C_ORANGE, C_TAN)
+
+    // fences, barrels and a haystack between the houses
+    picketFence(43, 38, 14)
+    picketFence(96, 38, 12)
+    barrel(97, 28)
+    barrel(46, 28)
+    bg.fillRect(100, 94, 9, 8, C_YELLOW)
+    bg.fillRect(100, 94, 9, 2, C_ORANGE)
+    bg.drawRect(100, 94, 9, 8, C_BROWN)
+
+    // market stall with a striped awning and goods on the counter
+    bg.fillRect(56, 94, 30, 16, C_BROWN)
+    bg.fillRect(56, 94, 30, 4, C_PLUM)
+    for (let sx = 54; sx < 88; sx += 6) {
+        bg.fillRect(sx, 84, 3, 8, C_RED)
+        bg.fillRect(sx + 3, 84, 3, 8, C_WHITE)
+    }
+    bg.drawRect(54, 84, 34, 8, C_BLACK)
+    bg.fillRect(58, 96, 4, 3, C_RED)                      // apples
+    bg.fillRect(64, 96, 4, 3, C_RED)
+    bg.fillRect(70, 96, 5, 3, C_ORANGE)                   // loaves
+    bg.fillRect(77, 96, 5, 3, C_GREEN)                    // cabbages
+
+    // washing line with patched cloaks, toys by a door
+    bg.drawLine(42, 24, 58, 24, C_WHITE)
+    bg.fillRect(46, 24, 4, 6, C_SKY)
+    bg.fillRect(52, 24, 4, 5, C_PINK)
+    bg.setPixel(47, 26, C_YELLOW)
+    bg.fillRect(104, 40, 3, 3, C_RED)
+    bg.fillRect(108, 41, 3, 3, C_BLUE)
+    bg.fillRect(112, 40, 2, 4, C_YELLOW)
+
+    // bare, dry soil with a rake and withered crops: a clue about the hunger
+    bg.fillRect(43, 92, 11, 24, C_BROWN)
+    speckle(43, 92, 11, 24, C_PLUM, 30)
+    bg.drawLine(46, 98, 46, 112, C_TAN)
+    bg.drawLine(42, 98, 50, 98, C_LILAC)
+    for (let cy = 100; cy < 116; cy += 5) {
+        bg.setPixel(50, cy, C_TAN)
+        bg.setPixel(50, cy + 1, C_TAN)
+        bg.setPixel(49, cy, C_YELLOW)
+    }
+
+    // the little table for the loaf
+    bg.fillRect(32, 60, 14, 6, C_BROWN)
+    bg.fillRect(32, 60, 14, 2, C_WHITE)
+    bg.fillRect(33, 66, 2, 3, C_BROWN)
+    bg.fillRect(43, 66, 2, 3, C_BROWN)
+
+    addNote(24, 44, "BAKERY. Bread at dawn. Market day: take what you need.")
+    addNote(50, 44, "Small cloaks hang on a washing line. Someone has patched them with care.")
+    addNote(106, 44, "A child's wooden toys sit by a front door.")
+    addNote(46, 76, "Farming tools lean against a wall. The soil beyond is bare.")
+    addExit(146, 46, 14, 30, 3, 16, 62)
+}
+
+// ----- Map 3: Old bridge. Theme: moonlit blues, black and ghostly mist -----
+function buildBridge() {
+    // night sky: black fading to plum, stars, a moon and far pine trees
+    bg.fillRect(0, 0, 160, 40, C_BLACK)
+    shade(0, 12, 160, 8, C_PLUM)
+    bg.fillRect(0, 20, 160, 20, C_PLUM)
+    speckle(0, 0, 160, 22, C_WHITE, 28)
+    moon(128, 14, 7)
+    for (let px = 4; px < 160; px += 9) {
+        pine(px, 40, randint(10, 18), C_BLACK)
+    }
+    shade(0, 34, 160, 6, C_LILAC)                         // horizon mist
+
+    // river with ripples and the moon's reflection
+    bg.fillRect(0, 40, 160, 44, C_BLUE)
+    for (let i = 0; i < 70; i++) {
+        let rx = randint(0, 152)
+        let ry = randint(41, 82)
+        bg.drawLine(rx, ry, rx + randint(3, 7), ry, C_SKY)
+    }
+    for (let ry = 42; ry < 82; ry += 3) {
+        bg.fillRect(124 + (ry % 2) * 3, ry, 6, 1, C_WHITE)
+    }
+    shade(0, 74, 160, 10, C_BLACK)
+
+    // wooden planks with nails and grain
+    bg.fillRect(0, 50, 160, 24, C_BROWN)
+    speckle(0, 50, 160, 24, C_PLUM, 90)
+    for (let x = 0; x < 160; x += 8) {
+        bg.drawLine(x, 50, x, 73, C_BLACK)
+        bg.setPixel(x + 2, 52, C_LILAC)
+        bg.setPixel(x + 2, 71, C_LILAC)
+    }
+    // rails, posts and two ghostly blue lanterns
+    bg.fillRect(0, 47, 160, 3, C_LILAC)
+    bg.fillRect(0, 74, 160, 3, C_LILAC)
+    for (let x = 6; x < 160; x += 20) {
+        bg.fillRect(x, 44, 3, 8, C_BROWN)
+        bg.fillRect(x, 72, 3, 10, C_BROWN)
+    }
+    for (let li = 0; li < 2; li++) {
+        let lx = 46
+        if (li == 1) {
+            lx = 106
+        }
+        shade(lx - 9, 36, 20, 16, C_SKY)
+        bg.fillRect(lx - 2, 40, 5, 6, C_BLACK)
+        bg.fillRect(lx - 1, 41, 3, 4, C_SKY)
+    }
+    speckle(0, 50, 160, 24, C_LILAC, 50)                  // drifting mist
+    bg.drawLine(138, 50, 138, 54, C_PLUM)                 // names carved into the rail
+    bg.drawLine(141, 49, 141, 53, C_PLUM)
+    bg.drawLine(144, 50, 144, 55, C_PLUM)
+    corridor(50, 74)
+
+    // dark bank below with reeds, rocks and glowing mushrooms
+    bg.fillRect(0, 84, 160, 36, C_BLACK)
+    shade(0, 84, 160, 12, C_PLUM)
+    for (let i = 0; i < 16; i++) {
+        let rx = randint(2, 157)
+        bg.drawLine(rx, 100, rx + 1, 94 - randint(0, 4), C_TEAL)
+        bg.drawLine(rx + 2, 100, rx + 2, 96 - randint(0, 3), C_GREEN)
+    }
+    for (let i = 0; i < 8; i++) {
+        let sx = randint(4, 150)
+        bg.fillRect(sx, 105 + randint(0, 8), 4, 2, C_PLUM)
+        bg.setPixel(sx + 1, 104 + randint(0, 8), C_SKY)
+    }
+
+    addNote(30, 62, "OLD CROSSING. Please cross with care.")
+    let carved = new MapNote(130, 62, "Names are scratched into the railing. One reads: WREN, WHO WAITED.")
+    carved.lockedText = "Names are scratched into the railing. Most are too worn to read."
+    carved.needs = 2
+    notes.push(carved)
+    addExit(146, 50, 14, 24, 4, 16, 90)
+}
+
+// ----- Map 4: Castle grounds. Theme: bright royal city, blue roofs, gold and lilac stone -----
+function buildCastleGrounds() {
+    // lawn with flowers
+    bg.fill(C_GREEN)
+    speckle(0, 0, 160, 120, C_TEAL, 150)
+    let petals = [C_RED, C_YELLOW, C_PINK, C_WHITE]
+    for (let i = 0; i < 40; i++) {
+        flower(randint(2, 157), randint(48, 117), petals[randint(0, 3)])
+    }
+    cobbles(0, 80, 160, 24, C_TAN, C_LILAC)               // road from the bridge
+    cobbles(62, 0, 36, 90, C_TAN, C_LILAC)                // avenue to the gate
+    hedge(56, 48, 5, 30)
+    hedge(99, 48, 5, 30)
+
+    // castle walls with crenellations, windows and shading
+    wallBlock(0, 0, 60, 46, C_LILAC, C_PLUM)
+    wallBlock(100, 0, 60, 46, C_LILAC, C_PLUM)
+    for (let cx = 0; cx < 60; cx += 10) {
+        bg.fillRect(cx + 2, 0, 5, 4, C_PLUM)
+        bg.fillRect(cx + 102, 0, 5, 4, C_PLUM)
+    }
+    for (let wx = 6; wx < 56; wx += 18) {
+        bg.fillRect(wx, 14, 6, 10, C_BLACK)
+        bg.fillRect(wx + 1, 15, 4, 8, C_YELLOW)
+        bg.fillRect(wx + 103 - 6 + 6 - 6, 14, 6, 10, C_BLACK)
+        bg.fillRect(wx + 104 - 6 + 6 - 6, 15, 4, 8, C_YELLOW)
+    }
+    shade(44, 0, 16, 46, C_PLUM)
+    shade(100, 0, 16, 46, C_PLUM)
+    bg.fillRect(0, 44, 160, 2, C_PLUM)                    // wall base
+
+    // the main gate: stone arch, wooden door with studs, torches, crest
+    bg.fillRect(64, 0, 32, 34, C_LILAC)
+    bg.drawRect(64, 0, 32, 34, C_PLUM)
+    for (let r = 0; r < 30; r++) {
+        let inset = 0
+        if (r < 6) {
+            inset = 6 - r
+        }
+        bg.fillRect(70 + inset, 4 + r, 20 - inset * 2, 1, C_BROWN)
+    }
+    for (let px = 74; px < 90; px += 5) {
+        bg.fillRect(px, 10, 1, 24, C_PLUM)
+    }
+    bg.fillRect(70, 20, 20, 1, C_BLACK)
+    bg.setPixel(77, 24, C_YELLOW)
+    bg.setPixel(82, 24, C_YELLOW)
+    bg.fillRect(78, 28, 4, 3, C_YELLOW)
+    torch(66, 14)
+    torch(92, 14)
+    bg.fillRect(76, 8, 8, 8, C_YELLOW)                    // royal crest above the door
+    bg.fillRect(78, 10, 4, 4, C_RED)
+    banner(14, 4, 8, 18)
+    banner(138, 4, 8, 18)
+
+    house(8, 50, 34, 28, C_BLUE, C_TAN)
+    house(116, 50, 36, 28, C_RED, C_TAN)
+
+    // soup stall with a striped awning
+    walls.push([30, 106, 30, 12])
+    bg.fillRect(30, 106, 30, 12, C_BROWN)
+    bg.drawRect(30, 106, 30, 12, C_BLACK)
+    for (let sx = 28; sx < 62; sx += 6) {
+        bg.fillRect(sx, 98, 3, 8, C_RED)
+        bg.fillRect(sx + 3, 98, 3, 8, C_WHITE)
+    }
+    bg.print("SOUP", 33, 109, C_WHITE)
+    bg.fillRect(41, 102, 10, 4, C_BLACK)                  // soup pot
+    speckle(40, 94, 12, 6, C_WHITE, 7)                    // steam
+
+    signPost(20, 90)
+    bg.fillRect(122, 82, 12, 9, C_BROWN)                  // notice board
+    bg.fillRect(124, 84, 4, 4, C_WHITE)
+    bg.fillRect(129, 85, 4, 5, C_TAN)
+    bg.setPixel(125, 84, C_RED)
+    bg.setPixel(130, 85, C_RED)
+    bg.fillRect(124, 91, 2, 5, C_BROWN)
+    bg.fillRect(130, 91, 2, 5, C_BROWN)
+    lampPost(50, 74)
+    lampPost(108, 74)
+
+    // children's chalk drawings: a crown, hearts and scribbles
+    speckle(66, 56, 28, 20, C_PINK, 12)
+    speckle(66, 56, 28, 20, C_SKY, 12)
+    speckle(66, 56, 28, 20, C_YELLOW, 12)
+    bg.fillRect(72, 64, 8, 2, C_YELLOW)
+    bg.setPixel(72, 62, C_YELLOW)
+    bg.setPixel(75, 61, C_YELLOW)
+    bg.setPixel(79, 62, C_YELLOW)
+    bg.setPixel(85, 68, C_PINK)
+    bg.setPixel(87, 68, C_PINK)
+    bg.fillRect(85, 69, 3, 1, C_PINK)
+
+    addNote(20, 90, "ROYAL CITY. Home of Princess Noelle's court. All visitors welcome.")
+    addNote(80, 34, "A banner bearing Princess Noelle's crest hangs by the gate.")
+    addNote(128, 90, "NOTICE: Strangers from the west have been seen on the road. Stay calm. Be polite.")
+    addNote(80, 66, "Chalk drawings of a princess cover the paving stones. Children made them.")
+    addNote(45, 104, "A hand-painted sign reads: SOUP FOR ANYONE WHO NEEDS IT.")
+    addExit(62, 0, 36, 20, 5, 80, 100)                    // gate into the castle
+}
+
+// ----- Map 5: Castle hall. Theme: warm stone, crimson and gold, window light -----
+function buildCastleHall() {
+    for (let ty = 0; ty < 8; ty++) {
+        for (let tx = 0; tx < 10; tx++) {
+            let col = C_LILAC
+            if ((tx + ty) % 2 == 1) {
+                col = C_TAN
+            }
+            bg.fillRect(tx * 16, ty * 16, 16, 16, col)
+        }
+    }
+    for (let x = 0; x < 160; x += 16) {
+        bg.drawLine(x, 0, x, 119, C_PLUM)
+    }
+    for (let y = 0; y < 120; y += 16) {
+        bg.drawLine(0, y, 159, y, C_PLUM)
+    }
+    speckle(0, 0, 160, 120, C_PLUM, 50)
+
+    // sunbeams on the floor
+    for (let k = 0; k < 4; k++) {
+        shade(24 + k * 3, 26 + k * 16, 14, 9, C_YELLOW)
+        shade(122 - k * 3, 26 + k * 16, 14, 9, C_YELLOW)
+    }
+
+    // royal carpet and a two-step dais
+    bg.fillRect(68, 16, 24, 104, C_RED)
+    bg.fillRect(68, 16, 2, 104, C_YELLOW)
+    bg.fillRect(90, 16, 2, 104, C_YELLOW)
+    bg.fillRect(44, 16, 72, 10, C_TAN)
+    bg.fillRect(44, 24, 72, 2, C_LILAC)
+    bg.fillRect(54, 16, 52, 6, C_WHITE)
+    bg.fillRect(54, 20, 52, 2, C_LILAC)
+    bg.fillRect(68, 16, 24, 10, C_RED)
+    bg.fillRect(68, 16, 2, 10, C_YELLOW)
+    bg.fillRect(90, 16, 2, 10, C_YELLOW)
+
+    // walls, windows, banners, torches and the throne
+    wallBlock(0, 0, 160, 16, C_PLUM, C_BLACK)
+    wallBlock(0, 0, 8, 120, C_PLUM, C_BLACK)
+    wallBlock(152, 0, 8, 120, C_PLUM, C_BLACK)
+    wallBlock(0, 112, 160, 8, C_PLUM, C_BLACK)
+    bg.fillRect(0, 14, 160, 1, C_YELLOW)
+    shade(8, 16, 144, 3, C_PLUM)
+    for (let wi = 0; wi < 2; wi++) {
+        let wx = 22
+        if (wi == 1) {
+            wx = 126
+        }
+        bg.fillRect(wx, 2, 12, 12, C_BLACK)
+        bg.fillRect(wx + 1, 3, 10, 11, C_SKY)
+        bg.fillRect(wx + 5, 3, 1, 11, C_BLACK)
+        bg.fillRect(wx + 1, 8, 10, 1, C_BLACK)
+    }
+    banner(38, 2, 8, 12)
+    banner(114, 2, 8, 12)
+    torch(54, 3)
+    torch(104, 3)
+    drawThrone(71, 1)
+
+    pillar(28, 40)
+    pillar(122, 40)
+    pillar(28, 76)
+    pillar(122, 76)
+    candles(62, 52)
+    candles(98, 52)
+    candles(62, 88)
+    candles(98, 88)
+}
+
+// A dark, themed backdrop for the battle screen.
+function makeBattleBg(index: number): Image {
+    let b = image.create(160, 120)
+    b.fill(C_BLACK)
+    for (let i = 0; i < 30; i++) {
+        b.setPixel(randint(0, 159), randint(0, 40), C_WHITE)
+    }
+    if (index == 1) {
+        // forest dusk: layers of pines
+        for (let x = 0; x < 160; x += 7) {
+            let h = randint(14, 24)
+            for (let i = 0; i < h; i++) {
+                let half = Math.idiv(i, 3)
+                b.fillRect(x - half, 76 - h + i, 1 + half * 2, 1, C_PLUM)
+            }
+        }
+        for (let x = 3; x < 160; x += 11) {
+            let h = randint(10, 18)
+            for (let i = 0; i < h; i++) {
+                let half = Math.idiv(i, 3)
+                b.fillRect(x - half, 76 - h + i, 1 + half * 2, 1, C_TEAL)
+            }
+        }
+    } else if (index == 2) {
+        // village at night: lit windows
+        for (let x = 4; x < 160; x += 26) {
+            b.fillRect(x, 56, 20, 20, C_PLUM)
+            b.fillRect(x - 2, 50, 24, 6, C_BROWN)
+            b.fillRect(x + 4, 62, 4, 4, C_YELLOW)
+            b.fillRect(x + 12, 62, 4, 4, C_YELLOW)
+        }
+    } else {
+        // bridge: moon and water
+        b.fillRect(124, 8, 14, 14, C_WHITE)
+        b.fillRect(122, 10, 18, 10, C_WHITE)
+        b.fillRect(0, 58, 160, 18, C_BLUE)
+        for (let i = 0; i < 24; i++) {
+            let rx = randint(0, 150)
+            let ry = randint(59, 74)
+            b.drawLine(rx, ry, rx + 6, ry, C_SKY)
+        }
+        b.fillRect(0, 54, 160, 3, C_LILAC)
+    }
+    b.drawRect(0, 0, 160, 120, C_PLUM)
+    return b
+}
+
+
+// ---------------------------------------------------------------------
+// 7. MAP MANAGEMENT AND THE EXPLORATION LOOP
+// ---------------------------------------------------------------------
+
+// Remove every sprite that belongs to the old map.
+function clearWorldSprites() {
+    let kinds = [SpriteKind.NPC, SpriteKind.Enemy, SpriteKind.Pickup]
+    for (let k of kinds) {
+        for (let s of sprites.allOfKind(k)) {
+            s.destroy()
+        }
+    }
+    for (let c of cast) {
+        c.sprite = null
+    }
+    bread = null
+}
+
+// Hide or show every world sprite (used when the battle screen opens).
+function setWorldVisible(visible: boolean) {
+    let kinds = [SpriteKind.NPC, SpriteKind.Enemy, SpriteKind.Pickup, SpriteKind.Player]
+    for (let k of kinds) {
+        for (let s of sprites.allOfKind(k)) {
+            s.setFlag(SpriteFlag.Invisible, !visible)
+        }
+    }
+}
+
+// Build a map, place Lancer and spawn whatever belongs there.
+function changeMap(index: number, sx: number, sy: number) {
+    clearWorldSprites()
+    mapIndex = index
+    walls = []
+    exits = []
+    notes = []
+    bg = image.create(160, 120)
+    if (index == 0) {
+        buildThroneRoom()
+    } else if (index == 1) {
+        buildForest()
+    } else if (index == 2) {
+        buildVillage()
+    } else if (index == 3) {
+        buildBridge()
+    } else if (index == 4) {
+        buildCastleGrounds()
+    } else {
+        buildCastleHall()
+    }
+    scene.setBackgroundImage(bg)
+    lancer.setPosition(sx, sy)
+    lastGoodX = sx
+    lastGoodY = sy
+
+    // Creatures that are still waiting on this map block the road.
+    for (let c of cast) {
+        if (c.mapIndex == index && c.state == 0) {
+            c.sprite = sprites.create(c.img, SpriteKind.Enemy)
+            c.sprite.setPosition(c.worldX, c.worldY)
+        }
+    }
+    // The loaf lies on a little table in the village.
+    if (index == 2 && !breadTaken) {
+        bread = sprites.create(breadImg, SpriteKind.Pickup)
+        bread.setPosition(39, 56)
+    }
+    // In the castle hall: Noelle, plus every creature that was spared.
+    if (index == 5) {
+        let noelle = sprites.create(makeNoelleImage(), SpriteKind.NPC)
+        noelle.setPosition(80, 32)
+        for (let c of cast) {
+            if (c.state == 1) {
+                let guest = sprites.create(c.img, SpriteKind.NPC)
+                guest.setPosition(c.hallX, c.hallY)
+            }
+        }
+    }
+}
+
+// Briefly show the name of a new area at the top of the screen.
+function showAreaTitle(index: number) {
+    areaToken += 1
+    let token = areaToken
+    let name = AREA_NAMES[index]
+    let img = image.create(160, 120)
+    let w = name.length * 6 + 12
+    let x = 80 - Math.idiv(w, 2)
+    img.fillRect(x, 4, w, 14, C_BLACK)
+    img.drawRect(x, 4, w, 14, C_YELLOW)
+    img.print(name, x + 6, 7, C_WHITE)
+    ui.setImage(img)
+    pause(1400)
+    if (token == areaToken && mode == GameMode.Explore && !inBattle) {
+        ui.setImage(image.create(160, 120))
+    }
+}
+
+// Stop Lancer and lock input (call from Explore mode before any dialogue).
+function enterCutscene() {
+    mode = GameMode.Cutscene
+    lancer.vx = 0
+    lancer.vy = 0
+}
+
+// Show several dialogue boxes in a row.
+function talk(lines: string[]) {
+    for (let line of lines) {
+        game.showLongText(line, DialogLayout.Bottom)
+    }
+}
+
+// Does Lancer's feet box at (cx, cy) overlap any wall?
+function blocked(cx: number, cy: number): boolean {
+    let left = cx - 4
+    let top = cy + 3
+    for (let w of walls) {
+        if (left < w[0] + w[2] && left + 8 > w[0] && top < w[1] + w[3] && top + 5 > w[1]) {
+            return true
+        }
+    }
+    return false
+}
+
+// Walking animation: face the direction of travel and swap leg frames.
+function animateLancer() {
+    if (lancer.vx < 0) {
+        facing = -1
+    } else if (lancer.vx > 0) {
+        facing = 1
+    }
+    if (lancer.vx != 0 || lancer.vy != 0) {
+        walkTimer += 1
+    } else {
+        walkTimer = 0
+    }
+    let frame = Math.idiv(walkTimer, 6) % 2
+    let pick = frame
+    if (facing < 0) {
+        pick = frame + 2
+    }
+    let wanted = lancerImgs[pick]
+    if (wanted != lancerCurrent) {
+        lancer.setImage(wanted)
+        lancerCurrent = wanted
+    }
+}
+
+// Move to another map. Runs in its own fiber so it may pause.
+function useExit(e: MapExit) {
+    enterCutscene()
+    control.runInParallel(function () {
+        changeMap(e.target, e.spawnX, e.spawnY)
+        mode = GameMode.Explore
+        showAreaTitle(e.target)
+    })
+}
+
+function pickUpBread() {
+    enterCutscene()
+    bread.destroy()
+    bread = null
+    hasBread = true
+    breadTaken = true
+    control.runInParallel(function () {
+        sfxGood()
+        talk(["You found a loaf of bread. It is still warm."])
+        mode = GameMode.Explore
+    })
+}
+
+// The note text may depend on what has already happened.
+function noteText(n: MapNote): string {
+    if (n.needs >= 0 && cast[n.needs].state == 0) {
+        return n.lockedText
+    }
+    return n.text
+}
+
+// A pressed in Explore mode: read the nearest sign or object.
+function inspectNearby() {
+    for (let n of notes) {
+        if (Math.abs(lancer.x - n.x) < 20 && Math.abs(lancer.y - n.y) < 22) {
+            enterCutscene()
+            talk([noteText(n)])
+            mode = GameMode.Explore
+            return
+        }
+    }
+}
+
+// Runs every frame while exploring.
+function exploreFrame() {
+    // 1. Movement from the D-pad
+    lancer.vx = controller.dx(WALK_SPEED)
+    lancer.vy = controller.dy(WALK_SPEED)
+
+    // 2. Wall collision: if the new position is inside a wall, slide
+    //    along it or go back to the last good position.
+    if (blocked(lancer.x, lancer.y)) {
+        if (!blocked(lastGoodX, lancer.y)) {
+            lancer.x = lastGoodX
+        } else if (!blocked(lancer.x, lastGoodY)) {
+            lancer.y = lastGoodY
+        } else {
+            lancer.x = lastGoodX
+            lancer.y = lastGoodY
+        }
+    }
+    lastGoodX = lancer.x
+    lastGoodY = lancer.y
+
+    // 3. Map exits
+    for (let e of exits) {
+        if (lancer.x >= e.x && lancer.x < e.x + e.w && lancer.y >= e.y && lancer.y < e.y + e.h) {
+            useExit(e)
+            return
+        }
+    }
+
+    // 4. Walking up to Noelle starts the ending
+    if (mapIndex == 5 && lancer.y < 62) {
+        enterCutscene()
+        control.runInParallel(function () {
+            runEnding()
+        })
+        return
+    }
+
+    // 5. Bread pickup. The radius is big enough that Lancer cannot walk
+    //    past the loaf anywhere along the width of the road.
+    if (bread != null && Math.abs(lancer.x - bread.x) < 14 && Math.abs(lancer.y - bread.y) < 18) {
+        pickUpBread()
+        return
+    }
+
+    // 6. Walking close to an unresolved creature starts an encounter
+    for (let c of cast) {
+        if (c.state == 0 && c.sprite != null && c.mapIndex == mapIndex) {
+            if (Math.abs(lancer.x - c.sprite.x) < 20 && Math.abs(lancer.y - c.sprite.y) < 20) {
+                beginEncounter(c)
+                return
+            }
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------
+// 8. SOUND, BATTLE SCREEN, MENU, UNDERSTAND, FIGHT AND DODGE
+// ---------------------------------------------------------------------
+
+function sfxGood() {
+    music.play(music.melodyPlayable(music.powerUp), music.PlaybackMode.InBackground)
+}
+
+function sfxBad() {
+    music.play(music.melodyPlayable(music.buzzer), music.PlaybackMode.InBackground)
+}
+
+function sfxHit() {
+    music.play(music.melodyPlayable(music.smallCrash), music.PlaybackMode.InBackground)
+}
+
+// Redraw the whole battle interface onto the transparent `ui` sprite.
+function drawUI() {
+    let img = image.create(160, 120)
+
+    // Creature name and health bar (top right)
+    if (inBattle && foe != null) {
+        img.print(foe.name, 100, 4, C_WHITE)
+        img.drawRect(100, 14, 56, 6, C_WHITE)
+        let w = Math.idiv(54 * foe.hp, foe.maxHp)
+        if (w > 0) {
+            img.fillRect(101, 15, w, 4, C_GREEN)
+        }
+    }
+
+    // FIGHT / UNDERSTAND / MERCY list, or the UNDERSTAND options
+    if (mode == GameMode.Menu || mode == GameMode.Understand) {
+        img.fillRect(0, 76, 160, 44, C_BLACK)
+        img.drawRect(0, 76, 160, 44, C_WHITE)
+        for (let i = 0; i < menuItems.length; i++) {
+            let y = 80 + i * 10
+            let col = C_WHITE
+            if (mode == GameMode.Menu && i == 2) {
+                if (canMercy) {
+                    col = C_GREEN       // green = MERCY is available
+                } else {
+                    col = C_LILAC       // dusty = locked
+                }
+            }
+            if (i == menuIndex) {
+                img.print(">", 6, y, C_YELLOW)
+                if (col == C_WHITE) {
+                    col = C_YELLOW
+                }
+            }
+            img.print(menuItems[i], 16, y, col)
+        }
+    }
+
+    // Timing bar: red = miss, green = hit, yellow = critical
+    if (mode == GameMode.Timing) {
+        img.fillRect(0, 76, 160, 44, C_BLACK)
+        img.drawRect(0, 76, 160, 44, C_WHITE)
+        img.print("Press A to strike!", 20, 80, C_WHITE)
+        img.fillRect(BAR_LEFT, 96, BAR_RIGHT - BAR_LEFT, 12, C_RED)
+        img.fillRect(BAR_CENTRE - HIT_RANGE, 96, HIT_RANGE * 2, 12, C_GREEN)
+        img.fillRect(BAR_CENTRE - CRIT_RANGE, 96, CRIT_RANGE * 2, 12, C_YELLOW)
+        img.drawRect(BAR_LEFT, 96, BAR_RIGHT - BAR_LEFT, 12, C_WHITE)
+    }
+
+    // Dodge arena
+    if (mode == GameMode.Dodge) {
+        img.drawRect(48, 56, 64, 44, C_WHITE)
+        img.print("DODGE!", 64, 106, C_RED)
+    }
+
+    ui.setImage(img)
+}
+
+// Show the main menu with the cursor on row `selected`.
+function returnToMenu(selected: number) {
+    menuItems = ["FIGHT", "UNDERSTAND", "MERCY"]
+    menuIndex = selected
+    mode = GameMode.Menu
+    drawUI()
+}
+
+// Called from the exploration loop when Lancer reaches a creature.
+function beginEncounter(c: Creature) {
+    enterCutscene()
+    control.runInParallel(function () {
+        foe = c
+        talk(c.introLines)
+        // Switch to the battle screen
+        inBattle = true
+        canMercy = false
+        c.hp = c.maxHp
+        setWorldVisible(false)
+        c.sprite.setFlag(SpriteFlag.Invisible, false)
+        c.sprite.setImage(enlarge(c.img))
+        c.sprite.setPosition(80, 34)
+        scene.setBackgroundImage(makeBattleBg(c.mapIndex))
+        returnToMenu(0)
+    })
+}
+
+// Leave the battle screen and go back to exploring.
+function endEncounter() {
+    inBattle = false
+    canMercy = false
+    if (foe.state == 2) {
+        foe.sprite.destroy()
+        foe.sprite = null
+    } else {
+        // A spared creature steps aside and becomes a harmless NPC.
+        foe.sprite.setImage(foe.img)
+        foe.sprite.setKind(SpriteKind.NPC)
+        foe.sprite.setPosition(foe.restX, foe.restY)
+    }
+    scene.setBackgroundImage(bg)
+    setWorldVisible(true)
+    info.setLife(START_LIFE)          // heal between encounters
+    ui.setImage(image.create(160, 120))
+    mode = GameMode.Explore
+}
+
+// ----- Menu input -----
+function moveCursor(step: number) {
+    if (mode != GameMode.Menu && mode != GameMode.Understand) {
+        return
+    }
+    menuIndex = (menuIndex + step + menuItems.length) % menuItems.length
+    drawUI()
+}
+
+function confirmMenu() {
+    let choice = menuIndex
+    mode = GameMode.Cutscene          // lock input while the action plays
+    if (choice == 0) {
+        startTiming()
+    } else if (choice == 1) {
+        menuItems = foe.options
+        menuIndex = 0
+        mode = GameMode.Understand
+        drawUI()
+    } else if (canMercy) {
+        spareFoe()
+    } else {
+        sfxBad()
+        drawUI()
+        talk(["Lancer doesn't understand " + foe.name + " well enough to end this peacefully."])
+        returnToMenu(2)
+    }
+}
+
+function confirmUnderstand() {
+    let opt = menuIndex
+    mode = GameMode.Cutscene
+    drawUI()
+    doUnderstand(foe, opt)
+}
+
+// MERCY: only reachable once canMercy is true.
+function spareFoe() {
+    sfxGood()
+    foe.state = 1
+    talk(foe.spareLines)
+    endEncounter()
+}
+
+// ----- UNDERSTAND logic: every creature needs different actions -----
+// flagA / flagB are the two steps each creature needs. MERCY unlocks
+// when both are true.
+function doUnderstand(c: Creature, opt: number) {
+    let wasUnlocked = canMercy
+    let hostile = false      // true = the creature retaliates
+
+    if (c.id == 0) {
+        // TARN the Frightened Guard. Needs: lower sword, THEN explain.
+        if (opt == 0) {
+            talk(["LANCER: Step aside, or I'll make you.", "TARN: I knew it! Keep away from me!"])
+            c.flagA = false
+            c.flagB = false
+            hostile = true
+        } else if (opt == 1) {
+            if (!c.flagA) {
+                talk(["LANCER: I'm looking for Princess Noelle. I mean no harm.", "TARN: Easy words... from someone holding a sword."])
+            } else if (!c.flagB) {
+                talk(["LANCER: I'm looking for Princess Noelle. I mean no harm.", "TARN: Noelle? You're not here to attack us?", "TARN: I only saw the sword. I was afraid."])
+                c.flagB = true
+            } else {
+                talk(["TARN: You've already explained. ...Thank you."])
+            }
+        } else {
+            if (!c.flagA) {
+                talk(["(You lower your sword.)", "TARN: ...What are you doing?"])
+                c.flagA = true
+            } else {
+                talk(["(Your sword is already lowered.)"])
+            }
+        }
+    } else if (c.id == 1) {
+        // MOSS the Hungry Creature. Needs: ask what is wrong AND offer food.
+        if (opt == 0) {
+            talk(["LANCER: Out of my way, you filthy little thing.", "MOSS: ...Grrrr!"])
+            hostile = true
+        } else if (opt == 1) {
+            if (!c.flagA) {
+                talk(["LANCER: Are you all right?", "MOSS: ...Haven't eaten. Not in days.", "(Its eyes dart to your bag again.)"])
+                c.flagA = true
+            } else {
+                talk(["MOSS: I told you. ...Still hungry."])
+            }
+        } else {
+            if (c.flagB) {
+                talk(["(Moss already has food.)"])
+            } else if (!hasBread) {
+                talk(["(You have nothing to offer.)"])
+            } else {
+                talk(["LANCER: Here. Take it.", "MOSS: ...For me? Really?", "(Moss eats quickly, then slows down. Its shoulders relax.)"])
+                hasBread = false
+                c.flagB = true
+            }
+        }
+    } else {
+        // WREN the Lonely Ghost. Needs: ask its name, THEN listen.
+        if (opt == 0) {
+            talk(["LANCER: Move. I need to cross.", "WREN: ...Everyone says that."])
+            hostile = true
+        } else if (opt == 1) {
+            talk(["(You look past the ghost as if it isn't there.)", "WREN: Don't... don't leave!"])
+            hostile = true
+        } else if (opt == 2) {
+            if (!c.flagA) {
+                talk(["LANCER: What's your name?", "WREN: ...Wren. Nobody has asked in so long.", "(The air feels a little warmer.)"])
+                c.flagA = true
+            } else {
+                talk(["WREN: I'm Wren. ...Thank you for remembering."])
+            }
+        } else {
+            if (!c.flagA) {
+                talk(["(Wren whispers something. You can't quite hold onto it.)"])
+            } else if (!c.flagB) {
+                talk(["(You stay quiet and listen.)", "WREN: This bridge used to be so busy. Everyone stopped to say goodbye.", "WREN: Then they stopped coming. ...Nobody says goodbye anymore.", "(Wren seems lighter.)"])
+                c.flagB = true
+            } else {
+                talk(["(Wren hums quietly. You listen a little longer.)"])
+            }
+        }
+    }
+
+    canMercy = c.flagA && c.flagB
+    if (hostile) {
+        dodgePhase(c)
+    }
+    if (canMercy && !wasUnlocked) {
+        sfxGood()
+        talk([c.unlockLine])
+    }
+    returnToMenu(1)
+}
+
+// ----- FIGHT: timing bar -----
+function startTiming() {
+    mode = GameMode.Timing
+    drawUI()
+    marker = sprites.create(markerImg, SpriteKind.Marker)
+    marker.z = 101
+    marker.setPosition(BAR_LEFT, 102)
+    marker.vx = foe.barSpeed
+}
+
+// Called when A is pressed in Timing mode. Distance from the centre of
+// the bar decides the damage.
+function strike() {
+    mode = GameMode.Cutscene
+    marker.vx = 0
+    let off = Math.abs(marker.x - BAR_CENTRE)
+    let dmg = 0
+    let label = "MISS"
+    if (off <= CRIT_RANGE) {
+        dmg = 3
+        label = "CRITICAL!"
+    } else if (off <= HIT_RANGE) {
+        dmg = 2
+        label = "HIT"
+    }
+    if (dmg > 0) {
+        foe.hp = Math.max(0, foe.hp - dmg)
+        sfxHit()
+        scene.cameraShake(4, 250)
+        foe.sprite.sayText(label + " -" + convertToText(dmg), 800)
+    } else {
+        sfxBad()
+        foe.sprite.sayText(label, 800)
+    }
+    drawUI()
+    pause(900)
+    marker.destroy()
+    marker = null
+    if (foe.hp <= 0) {
+        // ROUTE TRACKING: record the kill. The game does not comment on
+        // it now. The consequences appear in the ending.
+        kills += 1
+        foe.state = 2
+        talk(foe.deathLines)
+        endEncounter()
+    } else {
+        dodgePhase(foe)
+        returnToMenu(0)
+    }
+}
+
+// ----- Enemy retaliation: a short dodge sequence -----
+function spawnProjectile(c: Creature) {
+    let p = sprites.create(makeBullet(c.id), SpriteKind.Projectile)
+    if (c.id == 0) {
+        // Tarn throws spears straight down
+        p.setPosition(randint(52, 108), 58)
+        p.setVelocity(0, 55)
+    } else if (c.id == 1) {
+        // Moss snaps in from the sides
+        if (randint(0, 1) == 0) {
+            p.setPosition(50, randint(61, 97))
+            p.setVelocity(60, 0)
+        } else {
+            p.setPosition(110, randint(61, 97))
+            p.setVelocity(-60, 0)
+        }
+    } else {
+        // Wren's wisps drift toward the heart
+        let px = randint(52, 108)
+        p.setPosition(px, 58)
+        p.setVelocity(Math.idiv((heart.x - px) * 7, 10), Math.idiv((heart.y - 58) * 7, 10))
+    }
+}
+
+function dodgePhase(c: Creature) {
+    mode = GameMode.Dodge
+    drawUI()
+    heart = sprites.create(heartImg, SpriteKind.Heart)
+    heart.z = 102
+    heart.setPosition(80, 80)
+    let elapsed = 0
+    while (elapsed < c.dodgeMs) {
+        spawnProjectile(c)
+        pause(c.spawnMs)
+        elapsed += c.spawnMs
+    }
+    pause(700)
+    for (let p of sprites.allOfKind(SpriteKind.Projectile)) {
+        p.destroy()
+    }
+    heart.destroy()
+    heart = null
+    mode = GameMode.Cutscene
+    drawUI()
+}
+
+// Runs every frame during the timing bar.
+function timingFrame() {
+    if (marker == null) {
+        return
+    }
+    if (marker.x >= BAR_RIGHT) {
+        marker.vx = -Math.abs(marker.vx)
+    }
+    if (marker.x <= BAR_LEFT) {
+        marker.vx = Math.abs(marker.vx)
+    }
+}
+
+// Runs every frame during the dodge phase.
+function dodgeFrame() {
+    if (heart == null) {
+        return
+    }
+    heart.vx = controller.dx(HEART_SPEED)
+    heart.vy = controller.dy(HEART_SPEED)
+    heart.x = Math.max(52, Math.min(108, heart.x))
+    heart.y = Math.max(60, Math.min(96, heart.y))
+    for (let p of sprites.allOfKind(SpriteKind.Projectile)) {
+        if (p.x < 46 || p.x > 114 || p.y < 54 || p.y > 102) {
+            p.destroy()
+        }
+    }
+}
+
+
+// ---------------------------------------------------------------------
+// 9. ENDINGS (decided by the `kills` counter)
+// ---------------------------------------------------------------------
+
+function runEnding() {
+    mode = GameMode.Ending
+    if (kills == 0) {
+        // GOOD ENDING: nobody was killed.
+        talk([
+            "LANCER: Princess Noelle! You're safe!",
+            "NOELLE: Of course I'm safe. No one took me, Lancer.",
+            "NOELLE: These are my people. Tarn, Moss and Wren have already told me about the road.",
+            "LANCER: I thought they were monsters.",
+            "NOELLE: A lot of people do, at first.",
+            "NOELLE: You came here believing you had to be a hero.",
+            "NOELLE: But when you had every reason to fear us... you chose to understand.",
+            "NOELLE: That's what made you one."
+        ])
+        game.setGameOverMessage(true, "That's what made you one.")
+        game.over(true)
+    } else {
+        // BAD ENDING: one or more creatures were killed.
+        let missing = ""
+        let count = 0
+        for (let c of cast) {
+            if (c.state == 2) {
+                if (count > 0) {
+                    missing = missing + ", "
+                }
+                missing = missing + c.name
+                count += 1
+            }
+        }
+        talk([
+            "(The great hall is quiet. Too quiet.)",
+            "LANCER: Princess Noelle! You're safe!",
+            "NOELLE: Safe? No one took me, Lancer.",
+            "NOELLE: Everyone you met on the road was one of my people.",
+            "NOELLE: I was still waiting for: " + missing + ".",
+            "NOELLE: You came here to save one person.",
+            "NOELLE: How many did you decide didn't deserve saving?",
+            "NOELLE: You reached the princess.",
+            "NOELLE: But did you become the hero?"
+        ])
+        game.setGameOverMessage(false, "You reached the princess. But you never became the hero.")
+        game.over(false)
+    }
+}
+
+
+// ---------------------------------------------------------------------
+// 10. CONTROLLER EVENTS AND THE PER-FRAME UPDATE
+// ---------------------------------------------------------------------
+
+controller.up.onEvent(ControllerButtonEvent.Pressed, function () {
+    moveCursor(-1)
+})
+
+controller.down.onEvent(ControllerButtonEvent.Pressed, function () {
+    moveCursor(1)
+})
+
+controller.A.onEvent(ControllerButtonEvent.Pressed, function () {
+    if (mode == GameMode.Explore) {
+        inspectNearby()
+    } else if (mode == GameMode.Menu) {
+        confirmMenu()
+    } else if (mode == GameMode.Understand) {
+        confirmUnderstand()
+    } else if (mode == GameMode.Timing) {
+        strike()
+    }
+})
+
+controller.B.onEvent(ControllerButtonEvent.Pressed, function () {
+    if (mode == GameMode.Understand) {
+        returnToMenu(1)
+    }
+})
+
+// Heart hit by a projectile: lose one life, with a short invincibility.
+sprites.onOverlap(SpriteKind.Heart, SpriteKind.Projectile, function (sprite, otherSprite) {
+    otherSprite.destroy()
+    if (game.runtime() - lastHit > 900) {
+        lastHit = game.runtime()
+        info.changeLifeBy(-1)
+        sfxHit()
+        scene.cameraShake(3, 200)
+    }
+})
+
+game.onUpdate(function () {
+    if (mode == GameMode.Explore) {
+        exploreFrame()
+    } else if (mode == GameMode.Timing) {
+        timingFrame()
+    } else if (mode == GameMode.Dodge) {
+        dodgeFrame()
+    }
+    if (lancer != null) {
+        animateLancer()
+    }
+})
+
+
+// ---------------------------------------------------------------------
+// 11. START-UP
+// ---------------------------------------------------------------------
+
+// Create the three creatures and give each its own personality.
+function buildCast() {
+    let tarn = new Creature(0, "Tarn", 6, makeGuardImage(), 1)
+    tarn.worldX = 112
+    tarn.worldY = 60
+    tarn.restX = 112
+    tarn.restY = 52
+    tarn.hallX = 36
+    tarn.hallY = 56
+    tarn.barSpeed = 90
+    tarn.dodgeMs = 2400
+    tarn.spawnMs = 500
+    tarn.options = ["Threaten", "Explain", "Lower Sword"]
+    tarn.introLines = [
+        "A guard blocks the gate. His spear trembles in his hands.",
+        "TARN: Stop right there, outsider!",
+        "TARN: I know what that sword is for!"
+    ]
+    tarn.unlockLine = "(Tarn's grip on his spear loosens. Something has changed.)"
+    tarn.spareLines = [
+        "LANCER: I'm sorry I frightened you.",
+        "TARN: ...No. I'm sorry too. Go on through.",
+        "TARN: The village is just east. Please... go gently."
+    ]
+    tarn.deathLines = ["(Tarn crumples to the ground.)", "(The gate is quiet.)"]
+
+    let moss = new Creature(1, "Moss", 5, makeMossImage(), 2)
+    moss.worldX = 112
+    moss.worldY = 60
+    moss.restX = 112
+    moss.restY = 52
+    moss.hallX = 124
+    moss.hallY = 56
+    moss.barSpeed = 105
+    moss.dodgeMs = 2400
+    moss.spawnMs = 420
+    moss.options = ["Insult", "Ask what's wrong", "Offer Food"]
+    moss.introLines = [
+        "A small creature blocks the road. It bares its teeth.",
+        "MOSS: Stop! Don't come any closer!",
+        "(Its eyes keep darting to your bag.)"
+    ]
+    moss.unlockLine = "(Moss's snarl fades into a tired sigh.)"
+    moss.spareLines = [
+        "LANCER: Take care of yourself, Moss.",
+        "MOSS: ...Thank you. Really.",
+        "MOSS: The castle kitchen gives out soup on market days. Maybe I'll go."
+    ]
+    moss.deathLines = ["(Moss goes very still.)", "(The road is quiet.)"]
+
+    let wren = new Creature(2, "Wren", 6, makeWrenImage(), 3)
+    wren.worldX = 84
+    wren.worldY = 62
+    wren.restX = 84
+    wren.restY = 54
+    wren.hallX = 36
+    wren.hallY = 88
+    wren.barSpeed = 100
+    wren.dodgeMs = 2600
+    wren.spawnMs = 650
+    wren.options = ["Tell it to move", "Ignore", "Ask its name", "Listen"]
+    wren.introLines = [
+        "A pale shape drifts across the bridge, then stops in front of you.",
+        "WREN: Don't leave.",
+        "(It floats closer each time you look away.)"
+    ]
+    wren.unlockLine = "(Wren hovers, calm for the first time.)"
+    wren.spareLines = [
+        "LANCER: I have to keep going. But goodbye, Wren.",
+        "WREN: ...Goodbye. Thank you.",
+        "WREN: There's a window in the castle that faces the bridge. I'll watch from there."
+    ]
+    wren.deathLines = ["(Wren scatters like mist.)", "(The bridge is quiet.)"]
+
+    cast = [tarn, moss, wren]
+}
+
+// The opening throne-room cutscene.
+function runOpening() {
+    game.splash("What Makes a Hero?", "A story about understanding")
+    changeMap(0, 80, 98)
+    let king = sprites.create(makeKingImage(), SpriteKind.NPC)
+    king.setPosition(80, 36)
+    pause(500)
+    lancer.vy = -40            // Lancer walks toward the King
+    pause(800)
+    lancer.vy = 0
+    for (let line of OPENING_LINES) {
+        game.showLongText(line, DialogLayout.Bottom)
+    }
+    game.splash("QUEST START", "Find Princess Noelle")
+    mode = GameMode.Explore
+}
+
+info.setLife(START_LIFE)
+game.setGameOverMessage(false, "Lancer could not go on...")
+
+lancerImgs = [makeLancerFrame(0), makeLancerFrame(1), mirror(makeLancerFrame(0)), mirror(makeLancerFrame(1))]
+lancerCurrent = lancerImgs[0]
+lancer = sprites.create(lancerCurrent, SpriteKind.Player)
+lancer.z = 10
+lancer.setFlag(SpriteFlag.StayInScreen, true)
+
+ui = sprites.create(image.create(160, 120), SpriteKind.UI)
+ui.setFlag(SpriteFlag.Ghost, true)
+ui.z = 100
+ui.setPosition(80, 60)
+
+heartImg = makeHeartImage()
+markerImg = makeMarkerImage()
+breadImg = makeBreadImage()
+
+buildCast()
+runOpening()
