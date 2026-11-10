@@ -194,10 +194,15 @@ https://www.youtube.com/watch?v=7BHs1BzA4fs
 https://www.youtube.com/watch?v=eI9idPTT0c4
 •	Tan, C. (n.d.). Introduction to object-oriented programming with MakeCode Arcade. Little Bird Electronics.
 https://littlebirdelectronics.com.au/projects/introduction-to-object-oriented-programming-with-makecode-arcade
+•	Tan, C. (n.d.). Dungeon crawler with MakeCode Arcade. Little Bird Electronics.
+https://littlebirdelectronics.com.au/projects/dungeon-crawler-with-makecode-arcade
+•	Tan, C. (n.d.). Advanced dungeon crawler in MakeCode Arcade. Little Bird Electronics.
+https://littlebirdelectronics.com.au/projects/advanced-dungeon-crawler-in-makecode-arcade
 •	Tan, C. (n.d.). Player selection screen with MakeCode Arcade. Little Bird Electronics.
 https://littlebirdelectronics.com.au/projects/player-selection-screen-with-makecode-arcade
 •	freeCodeCamp.org. (2020, April 8). Learn JavaScript by building 7 games [Video]. YouTube.
 https://www.freecodecamp.org/news/learn-javascript-by-building-7-games-video-course/
+
 
 
 Project Purpose
