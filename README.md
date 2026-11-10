@@ -182,13 +182,23 @@ Development Resources
 Resources consulted during development included Microsoft MakeCode Arcade documentation and tutorials covering areas such as sprites, maps, JavaScript, collision detection and game development.
 
 Relevant MakeCode resources include:
-- Microsoft MakeCode Arcade
-  https://arcade.makecode.com/
-- Setting the Scene
-  https://arcade.makecode.com/concepts/setting-the-scene
-- Maze Tutorial
-  https://arcade.makecode.com/tutorials/maze
-Additional JavaScript and game-development tutorials used during development are acknowledged in the project documentation and reference list.
+•	Fox, T. (2018–2025). Deltarune [Video game]. Toby Fox.
+•	Microsoft MakeCode. (n.d.). Activity: Boolean statements and expressions. https://arcade.makecode.com/courses/csintro2/logic/booleans
+•	Microsoft MakeCode. (n.d.). Activity: If and else comparisons. https://arcade.makecode.com/courses/csintro2/logic/if-else
+•	Microsoft MakeCode. (n.d.). Maze. https://arcade.makecode.com/tutorials/maze
+•	Chris Courses. (2022, March 12). Pokémon JavaScript game tutorial with HTML Canvas [Video]. YouTube.
+https://www.youtube.com/watch?v=yP5DKzriqXA
+•	freeCodeCamp.org. (2022, September 28). Code a 2D game using JavaScript, HTML, and CSS (w/ free game assets) – Tutorial [Video]. YouTube.
+https://www.youtube.com/watch?v=7BHs1BzA4fs
+•	Chris Courses. (2020, September 21). HTML5 Canvas and JavaScript game tutorial [Video]. YouTube.
+https://www.youtube.com/watch?v=eI9idPTT0c4
+•	Tan, C. (n.d.). Introduction to object-oriented programming with MakeCode Arcade. Little Bird Electronics.
+https://littlebirdelectronics.com.au/projects/introduction-to-object-oriented-programming-with-makecode-arcade
+•	Tan, C. (n.d.). Player selection screen with MakeCode Arcade. Little Bird Electronics.
+https://littlebirdelectronics.com.au/projects/player-selection-screen-with-makecode-arcade
+•	freeCodeCamp.org. (2020, April 8). Learn JavaScript by building 7 games [Video]. YouTube.
+https://www.freecodecamp.org/news/learn-javascript-by-building-7-games-video-course/
+
 
 Project Purpose
 The technical goal of the project was to develop my understanding of code literacy through the creation of a larger interactive system.
